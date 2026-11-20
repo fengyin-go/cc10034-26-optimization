@@ -77,5 +77,43 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 维度快照与历史版本（SCD Type2 增强）
+
+`backend/app/dim_snapshot.py` 在通用模块之外提供严格的版本化维度存储，
+路由前缀 `/api/dim-snapshot`（在通用 `/api/{module}` 之前注册，不会被动态路径抢占），
+前端入口为「维度快照」页面（`/dim_snapshot`）。
+
+核心不变量：
+
+- 版本区间 `[effective_from, effective_to)` 半开、两个有效时段不重叠、只追加不改写；
+  回溯更正先关闭承接区间（含未结束的开放区间），再发布新版本，历史版本永久保留。
+- 指定时刻快照按 `effective_from <= 业务日期 < effective_to` 命中唯一版本，
+  快照行含维表、自然键和版本。
+- 每次查询开启固化一份**快照目录（catalog）**，记录每个自然键选中的 `version_id`；
+  跨页只认目录，后续更正不影响旧查询，旧结果可随时复现。
+- 同一来源更正按幂等指纹去重，重复提交只落库一次；落入历史空档的更正直接拒绝。
+- 快照比对产出字段级差异并回写维度记录，差异清单引用版本必须与快照清单一致；
+  `reconcile` 同步核对已发布版本与目录、比对实际使用的版本。
+- 业务日期与录入日期冲突时，新查询按业务日期命中当前已发布版本，并以
+  `backdated_correction` 标记回溯更正；差异据此区分为「更正影响既有日期」与
+  「本次新增差异」。
+
+主要接口：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/dim-snapshot/versions/{dim_table}` | 已发布历史版本，可按 `customer_id` 过滤 |
+| GET | `/api/dim-snapshot/as-of` | 单键指定时刻版本定位（不固化目录） |
+| GET | `/api/dim-snapshot/snapshot` | 指定时刻快照分页，带 `catalog_id` 时固定版本 |
+| POST | `/api/dim-snapshot/queries` | 开启新查询并固化快照目录 |
+| GET | `/api/dim-snapshot/catalogs` | 快照目录清单 |
+| POST | `/api/dim-snapshot/dimensions` | 新自然键建档（首版本） |
+| POST | `/api/dim-snapshot/corrections` | 补交更正（幂等、关闭承接区间、发新版本） |
+| POST | `/api/dim-snapshot/compare` | 新/旧快照字段级比对，差异回写 |
+| GET | `/api/dim-snapshot/differences` | 差异清单 |
+| GET | `/api/dim-snapshot/reconcile` | 已发布版本与比对版本核对 |
+
+服务层测试：`backend/tests/test_dim_snapshot.py`（`python -I tests/test_dim_snapshot.py`）。
+
 领域：数据工程
 子方向：数仓与数据湖
